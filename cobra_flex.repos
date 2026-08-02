@@ -1,0 +1,5 @@
+repositories:
+  ros-portal:
+    type: git
+    url: git@github.com:livekit/ros-portal.git
+    version: sderosa/BOT-408-livekit-capture  # TODO: bump to main once BOT-408 merges
