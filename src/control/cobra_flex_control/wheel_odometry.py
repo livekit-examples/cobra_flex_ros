@@ -132,7 +132,7 @@ class WheelOdometry(Node):
         v_left = self._side_speed(msg, self._left_joints)
         v_right = self._side_speed(msg, self._right_joints)
         if v_left is None or v_right is None:
-            self.get_logger().warn(
+            self.get_logger().warning(
                 'wheel_states is missing configured left/right joints; check '
                 'left_wheel_joints / right_wheel_joints.',
                 throttle_duration_sec=10.0)

@@ -1,4 +1,7 @@
+src/externals/
 build/
 install/
 log/
+**/__pycache__/
+**.zip
 

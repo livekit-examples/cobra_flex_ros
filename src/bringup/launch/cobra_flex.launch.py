@@ -23,6 +23,8 @@ Nodes:
   * ekf_filter_node   -- (use_ekf:=true) robot_localization smoothing over the
                          wheel odometry, republished as /odom. Mostly a
                          placeholder until an IMU or laser odometry is added.
+  * pan_tilt_driver   -- (use_pan_tilt:=true) Feetech STS3215 pan/tilt head:
+                         position/velocity commands in; joint_states out.
 
 The chassis has no additional sensors today, so this is the whole stack.
 """
@@ -41,12 +43,9 @@ from launch_ros.actions import Node
 
 def _launch_setup(context, *args, **kwargs):
     params_file = LaunchConfiguration('params_file').perform(context)
-    serial_port = LaunchConfiguration('serial_port').perform(context)
     use_ekf = LaunchConfiguration('use_ekf').perform(context).lower() in ('true', '1')
-
-    driver_overrides = {}
-    if serial_port:
-        driver_overrides['serial_port'] = serial_port
+    use_pan_tilt = (LaunchConfiguration('use_pan_tilt').perform(context).lower()
+                    in ('true', '1'))
 
     actions = [
         Node(
@@ -54,7 +53,9 @@ def _launch_setup(context, *args, **kwargs):
             executable='cobra_flex_driver',
             name='cobra_flex_driver',
             output='screen',
-            parameters=[params_file, driver_overrides],
+            parameters=[params_file, {
+                'serial_port': LaunchConfiguration('rover_serial_port').perform(context),
+            }],
         ),
         Node(
             package='cobra_flex_control',
@@ -75,6 +76,16 @@ def _launch_setup(context, *args, **kwargs):
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
             }.items(),
         ))
+    if use_pan_tilt:
+        actions.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(
+                get_package_share_directory('cobra_flex_pan_tilt'),
+                'launch', 'pan_tilt.launch.py')),
+            launch_arguments={
+                'params_file': LaunchConfiguration('params_file'),
+                'serial_port': LaunchConfiguration('pan_tilt_serial_port'),
+            }.items(),
+        ))
     return actions
 
 
@@ -85,13 +96,25 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('params_file', default_value=default_params,
                               description='Parameters for the driver and wheel odometry.'),
-        DeclareLaunchArgument('serial_port', default_value='',
-                              description='Override the driver serial port; empty keeps '
-                                          'the params_file value.'),
+        # CH343 bridges addressed by serial number so USB enumeration order
+        # can't swap chassis and pan/tilt. Re-check with:
+        #   ros2 run cobra_flex_bringup identify_serial_ports.py
+        DeclareLaunchArgument(
+            'rover_serial_port',
+            default_value='/dev/serial/by-id/usb-1a86_USB_Single_Serial_5AE6059088-if00',
+            description='Chassis driver serial port (CH343; ESP32 native USB is debug-only).'),
+        DeclareLaunchArgument(
+            'pan_tilt_serial_port',
+            default_value='/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A7C121888-if00',
+            description='Pan/tilt Feetech STS bus serial port. Only used when '
+                        'use_pan_tilt:=true.'),
         DeclareLaunchArgument('use_ekf', default_value='false',
                               description='true -> run the robot_localization EKF '
                                           '(cobra_flex_localization) and let it own the '
                                           'odom -> base_link transform.'),
+        DeclareLaunchArgument('use_pan_tilt', default_value='false',
+                              description='true -> run the pan/tilt servo driver '
+                                          '(cobra_flex_pan_tilt).'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         OpaqueFunction(function=_launch_setup),
     ])
