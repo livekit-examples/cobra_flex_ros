@@ -1,5 +1,9 @@
 # Cobra Flex ROS
 
+> [!IMPORTANT]
+> This repository is currently in Developer Preview mode and not ready for production use.
+> There may be bugs, and APIs and configuration options are subject to change during this period.
+
 ROS2 stack for the [Waveshare Cobra Flex](https://www.waveshare.com/wiki/Cobra_Flex)
 4WD chassis, driven from a Jetson Orin Nano over serial.
 
