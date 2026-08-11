@@ -47,12 +47,20 @@ fallback). A background reader thread parses the reply frames::
 - ``v``: battery voltage in 0.01 V -> ``sensor_msgs/BatteryState`` on
   ``battery_state``.
 
+Lights: ``set_headlights`` and ``set_aux_light`` (``std_srvs/SetBool``) drive
+the board's two 12V switch channels (``{"T":132,"IO1":..,"IO2":..}``, 0-255
+PWM; IO1 chassis headlights, IO2 pan-tilt/aux light). The headlight state is
+published on ``headlights_state`` (``std_msgs/Bool``) at a fixed rate
+(``headlights_state_rate``).
+
 The base chassis has no IMU or other sensors; downstream odometry is derived
 from the wheel feedback (see ``cobra_flex_control``).
 """
 
 import json
+import math
 import threading
+import time
 
 from geometry_msgs.msg import Twist
 import rclpy
@@ -60,9 +68,12 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import BatteryState
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
+from std_srvs.srv import SetBool
 
 from cobra_flex_driver.kinematics import tenth_rpm_to_rad_s
 from cobra_flex_driver.kinematics import twist_to_wheel_tenth_rpm
+from cobra_flex_driver.lk_graphic_producer import LKGraphicProducer
 
 try:
     import serial
@@ -74,6 +85,10 @@ except ImportError as exc:  # pragma: no cover - surfaced clearly at runtime
 
 # JSON command types from the wiki (defined in the firmware's json_cmd.h).
 CMD_SPEED_INPUT = 1          # {"T":1,"L":..,"R":..} per-side speed, 0.1 rpm
+CMD_OLED_CTRL = 3            # {"T":3,"lineNum":0..3,"Text":..} custom OLED line
+CMD_OLED_DEFAULT = -3        # {"T":-3} restore the default OLED info screen
+CMD_MOTOR_ENABLE = 12        # {"T":12} enable DDSM400 motors + speed-loop mode
+CMD_LIGHT_CTRL = 132         # {"T":132,"IO1":0..255,"IO2":0..255} 12V switch / LED PWM
 CMD_FEEDBACK_POLL = 130      # {"T":130} request one feedback frame
 CMD_FEEDBACK_STREAM = 131    # {"T":131,"cmd":0|1} continuous feedback off/on
 FEEDBACK_T = 1001            # feedback frame tag (matched by fields, not tag)
@@ -103,11 +118,24 @@ class CobraFlexDriver(Node):
         self.declare_parameter('control_rate', 20.0)
         # Safety / timing.
         self.declare_parameter('cmd_timeout', 0.5)
+        # Skid-steer turn shaping. The four fixed wheels scrub sideways when
+        # yawing, so the geometric track width under-drives turns; angular_scale
+        # multiplies angular.z before the diff-drive conversion (an effective
+        # track-width correction — tune empirically, >1 turns harder). The
+        # reference ugv_bringup instead sends T:13 and lets the firmware pick
+        # the constants, and clamps in-place turns to a minimum 0.2 rad/s;
+        # min_inplace_angular mirrors that clamp (0.0 disables it).
+        self.declare_parameter('angular_scale', 1.0)
+        self.declare_parameter('min_inplace_angular', 0.0)
 
         # Feedback. continuous_feedback enables the firmware stream (T:131);
         # feedback_poll_rate > 0 additionally polls with T:130 (harmless if the
-        # stream is on; the sole source if it is off).
+        # stream is on; the sole source if it is off). The startup T:131 (and
+        # the T:12 motor arm) can be lost — opening the port can reset the
+        # ESP32, which is still booting when they arrive — so if no feedback
+        # frame lands within feedback_timeout seconds both are re-sent.
         self.declare_parameter('continuous_feedback', True)
+        self.declare_parameter('feedback_timeout', 2.0)
         self.declare_parameter('feedback_poll_rate', 0.0)
         self.declare_parameter('publish_wheel_states', True)
         # Joint names in feedback order M1..M4 (LF, RF, RR, LR).
@@ -118,6 +146,21 @@ class CobraFlexDriver(Node):
             'rear_left_wheel_joint',
         ])
         self.declare_parameter('publish_battery', True)
+        # OLED graphic: replaces the firmware's default info screen with the
+        # animated "LiveKit" type-on/type-off graphic (lk_graphic_producer).
+        # The 128x32 screen fits 4 lines of 21 characters. oled_frame_rate is
+        # how often changed lines are pushed over serial; the animation's own
+        # timing is wall-clock based, so a lower rate only coarsens rendering.
+        # Each changed line costs ~50 bytes (~4 ms at 115200 baud), so much
+        # above 25 Hz the OLED traffic starts crowding the motor commands.
+        self.declare_parameter('oled_animation', False)
+        self.declare_parameter('oled_frame_rate', 25.0)
+        # Lights: brightness (0-255 PWM on the 12V switch ports) applied when a
+        # light is switched on via the set_headlights / set_aux_light services.
+        self.declare_parameter('headlight_brightness', 255)
+        self.declare_parameter('aux_light_brightness', 255)
+        # Rate at which the current headlight state is (re)published.
+        self.declare_parameter('headlights_state_rate', 1.0)
         # Feedback scaling: "v":1173 -> 11.73 V; "odl"/"odr" are cm.
         self.declare_parameter('voltage_scale', 0.01)
         self.declare_parameter('mileage_scale', 0.01)
@@ -129,11 +172,19 @@ class CobraFlexDriver(Node):
         self._max_tenth_rpm = float(self.get_parameter('max_wheel_rpm').value) * 10.0
         self._control_rate = float(self.get_parameter('control_rate').value)
         self._cmd_timeout = float(self.get_parameter('cmd_timeout').value)
+        self._angular_scale = float(self.get_parameter('angular_scale').value)
+        self._min_inplace_angular = float(self.get_parameter('min_inplace_angular').value)
         self._continuous_feedback = bool(self.get_parameter('continuous_feedback').value)
+        self._feedback_timeout = float(self.get_parameter('feedback_timeout').value)
         self._poll_rate = float(self.get_parameter('feedback_poll_rate').value)
         self._publish_wheel_states = bool(self.get_parameter('publish_wheel_states').value)
         self._joint_names = [str(n) for n in self.get_parameter('wheel_joint_names').value]
         self._publish_battery = bool(self.get_parameter('publish_battery').value)
+        self._oled_animation = bool(self.get_parameter('oled_animation').value)
+        self._oled_frame_rate = float(self.get_parameter('oled_frame_rate').value)
+        self._headlight_brightness = int(self.get_parameter('headlight_brightness').value)
+        self._aux_light_brightness = int(self.get_parameter('aux_light_brightness').value)
+        self._headlights_state_rate = float(self.get_parameter('headlights_state_rate').value)
         self._voltage_scale = float(self.get_parameter('voltage_scale').value)
         self._mileage_scale = float(self.get_parameter('mileage_scale').value)
 
@@ -141,6 +192,14 @@ class CobraFlexDriver(Node):
             raise ValueError('wheel_radius and track_width must be > 0')
         if self._max_tenth_rpm <= 0.0:
             raise ValueError('max_wheel_rpm must be > 0')
+        if self._angular_scale <= 0.0:
+            raise ValueError('angular_scale must be > 0')
+        if self._min_inplace_angular < 0.0:
+            raise ValueError('min_inplace_angular must be >= 0')
+        for name, value in (('headlight_brightness', self._headlight_brightness),
+                            ('aux_light_brightness', self._aux_light_brightness)):
+            if not 0 <= value <= 255:
+                raise ValueError(f'{name} must be in 0..255, got {value}')
         if len(self._joint_names) != 4:
             raise ValueError(
                 f'wheel_joint_names must have exactly 4 elements, got {len(self._joint_names)}')
@@ -151,6 +210,12 @@ class CobraFlexDriver(Node):
             f'(wheel_radius={self._wheel_radius} m, track_width={self._track_width} m, '
             f'max_wheel_rpm={self._max_tenth_rpm / 10.0})'
         )
+
+        # Arm the DDSM400 hub motors (enable + speed-loop mode). The firmware
+        # does this once in setup(), but the ESP32 boots on USB power and the
+        # enable is lost if the motor rail wasn't up at that moment; without it
+        # every speed command is silently ignored while telemetry still works.
+        self._write_json({'T': CMD_MOTOR_ENABLE})
 
         self._last_cmd_time = self.get_clock().now()
         self._stopped = True  # avoid spamming stop frames once already stopped
@@ -167,6 +232,32 @@ class CobraFlexDriver(Node):
         control_dt = 1.0 / self._control_rate if self._control_rate > 0.0 else 0.05
         self._control_timer = self.create_timer(control_dt, self._on_control_tick)
 
+        # OLED graphic: LKGraphicProducer composites the animation into 4
+        # fixed-width lines; each frame tick only re-sends lines that changed.
+        self._oled_lines_sent = None
+        if self._oled_animation:
+            if self._oled_frame_rate <= 0.0:
+                raise ValueError('oled_frame_rate must be > 0')
+            self._oled_graphic = LKGraphicProducer(width=21, height=4)
+            self._oled_timer = self.create_timer(
+                1.0 / self._oled_frame_rate, self._on_oled_frame)
+
+        # Lights: two 12V switch channels on the driver board (IO1 chassis
+        # headlights, IO2 pan-tilt/aux light), driven together by one T:132
+        # frame, so both states are tracked to avoid clobbering the other
+        # channel. Firmware boots with both off. headlights_state is
+        # republished at a fixed rate so any subscriber (e.g. the LiveKit
+        # bridge) sees the current state regardless of when it joins.
+        self._headlights_on = False
+        self._aux_light_on = False
+        self._headlights_pub = self.create_publisher(Bool, 'headlights_state', 10)
+        if self._headlights_state_rate <= 0.0:
+            raise ValueError('headlights_state_rate must be > 0')
+        self._headlights_state_timer = self.create_timer(
+            1.0 / self._headlights_state_rate, self._publish_headlights_state)
+        self.create_service(SetBool, 'set_headlights', self._on_set_headlights)
+        self.create_service(SetBool, 'set_aux_light', self._on_set_aux_light)
+
         # Feedback: background serial reader + firmware stream and/or poll.
         self._running = True
         self._reader = None
@@ -176,11 +267,16 @@ class CobraFlexDriver(Node):
         if self._publish_battery:
             self._battery_pub = self.create_publisher(
                 BatteryState, 'battery_state', qos_profile_sensor_data)
+        self._last_feedback_monotonic = None
         if self._publish_wheel_states or self._publish_battery:
             self._reader = threading.Thread(target=self._read_loop, daemon=True)
             self._reader.start()
             if self._continuous_feedback:
                 self._write_json({'T': CMD_FEEDBACK_STREAM, 'cmd': 1})
+                if self._feedback_timeout <= 0.0:
+                    raise ValueError('feedback_timeout must be > 0')
+                self._feedback_watchdog = self.create_timer(
+                    self._feedback_timeout, self._on_feedback_watchdog)
             if self._poll_rate > 0.0:
                 self._poll_timer = self.create_timer(1.0 / self._poll_rate, self._on_poll)
             self.get_logger().info(
@@ -190,8 +286,12 @@ class CobraFlexDriver(Node):
             )
 
     def _on_cmd_vel(self, msg: Twist) -> None:
+        angular = msg.angular.z * self._angular_scale
+        if (msg.linear.x == 0.0 and angular != 0.0
+                and abs(angular) < self._min_inplace_angular):
+            angular = math.copysign(self._min_inplace_angular, angular)
         self._target_left, self._target_right = twist_to_wheel_tenth_rpm(
-            msg.linear.x, msg.angular.z,
+            msg.linear.x, angular,
             self._wheel_radius, self._track_width, self._max_tenth_rpm)
         self._last_cmd_time = self.get_clock().now()
 
@@ -203,10 +303,46 @@ class CobraFlexDriver(Node):
             return
         self._send(self._target_left, self._target_right)
 
+    def _on_oled_frame(self) -> None:
+        """Render the current animation frame and send only the changed lines."""
+        lines = self._oled_graphic.render(time.monotonic())
+        for line_num, text in enumerate(lines):
+            if self._oled_lines_sent is None or text != self._oled_lines_sent[line_num]:
+                self._write_json({'T': CMD_OLED_CTRL, 'lineNum': line_num, 'Text': text})
+        self._oled_lines_sent = lines
+
+    def _on_set_headlights(self, request: SetBool.Request,
+                           response: SetBool.Response) -> SetBool.Response:
+        return self._set_lights(response, headlights=request.data)
+
+    def _on_set_aux_light(self, request: SetBool.Request,
+                          response: SetBool.Response) -> SetBool.Response:
+        return self._set_lights(response, aux=request.data)
+
+    def _set_lights(self, response: SetBool.Response, headlights: bool = None,
+                    aux: bool = None) -> SetBool.Response:
+        if headlights is not None:
+            self._headlights_on = headlights
+        if aux is not None:
+            self._aux_light_on = aux
+        io1 = self._headlight_brightness if self._headlights_on else 0
+        io2 = self._aux_light_brightness if self._aux_light_on else 0
+        response.success = self._write_json({'T': CMD_LIGHT_CTRL, 'IO1': io1, 'IO2': io2})
+        response.message = (
+            f'headlights {"on" if self._headlights_on else "off"}, '
+            f'aux light {"on" if self._aux_light_on else "off"}'
+            if response.success else 'serial write failed')
+        if response.success and headlights is not None:
+            self._publish_headlights_state()  # immediate update between timer ticks
+        return response
+
+    def _publish_headlights_state(self) -> None:
+        self._headlights_pub.publish(Bool(data=self._headlights_on))
+
     def _on_watchdog(self) -> None:
         elapsed = (self.get_clock().now() - self._last_cmd_time).nanoseconds * 1e-9
         if elapsed >= self._cmd_timeout and not self._stopped:
-            self.get_logger().warn(
+            self.get_logger().warning(
                 f'No cmd_vel for {elapsed:.2f}s (> {self._cmd_timeout}s); stopping motors.'
             )
             self._target_left = 0.0
@@ -226,6 +362,22 @@ class CobraFlexDriver(Node):
         # The firmware takes integer 0.1 rpm values.
         if self._write_json({'T': CMD_SPEED_INPUT, 'L': round(left), 'R': round(right)}):
             self._stopped = left == 0.0 and right == 0.0
+
+    def _on_feedback_watchdog(self) -> None:
+        """Re-arm the motors and feedback stream if the stream never came up.
+
+        The startup T:12/T:131 are lost when the ESP32 is still booting (port
+        open can reset it); both are idempotent, so keep re-sending until
+        frames actually flow.
+        """
+        last = self._last_feedback_monotonic
+        if last is not None and time.monotonic() - last < self._feedback_timeout:
+            return
+        self.get_logger().warning(
+            f'No feedback frame in {self._feedback_timeout}s; '
+            're-sending motor enable (T:12) and stream enable (T:131).')
+        self._write_json({'T': CMD_MOTOR_ENABLE})
+        self._write_json({'T': CMD_FEEDBACK_STREAM, 'cmd': 1})
 
     def _on_poll(self) -> None:
         """Nudge the board for a feedback frame (a no-op if it is already streaming)."""
@@ -251,6 +403,7 @@ class CobraFlexDriver(Node):
             except (json.JSONDecodeError, ValueError):
                 continue
             if isinstance(data, dict):
+                self._last_feedback_monotonic = time.monotonic()
                 self._publish_feedback(data)
 
     def _publish_feedback(self, data: dict) -> None:
@@ -306,6 +459,10 @@ class CobraFlexDriver(Node):
                 if self._continuous_feedback:
                     self._write_json({'T': CMD_FEEDBACK_STREAM, 'cmd': 0})
                 self._send(0.0, 0.0)
+                if self._headlights_on or self._aux_light_on:
+                    self._write_json({'T': CMD_LIGHT_CTRL, 'IO1': 0, 'IO2': 0})
+                if self._oled_animation and self._oled_lines_sent is not None:
+                    self._write_json({'T': CMD_OLED_DEFAULT})
                 self._serial.close()
         except serial.SerialException:
             pass

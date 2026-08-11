@@ -1,13 +1,17 @@
 # Shared parameters for the Cobra Flex physical stack.
 cobra_flex_driver:
   ros__parameters:
-    serial_port: /dev/ttyACM0   # VERIFY: ttyACM (USB) vs ttyTHS (UART header)
     baud: 115200
     wheel_radius: 0.03725       # 74.5 mm drive wheels
     track_width: 0.228          # 228 mm track
     max_wheel_rpm: 180.0        # protocol bound; rated speed is 100 rpm
     control_rate: 20.0
     cmd_timeout: 0.5
+    angular_scale: 2.0          # skid-steer effective-track correction; tune on the robot
+    min_inplace_angular: 0.2    # rad/s floor for in-place turns (matches ugv_bringup)
+    feedback_timeout: 2.0       # re-send T:12/T:131 if the feedback stream is silent
+    oled_animation: true        # animated "LiveKit" graphic on the OLED
+    oled_frame_rate: 25.0       # frame pushes/s; higher crowds the serial link
     continuous_feedback: true
     feedback_poll_rate: 0.0     # rely on the firmware stream; >0 adds T:130 polls
     publish_wheel_states: true
@@ -21,3 +25,12 @@ wheel_odometry:
     base_frame: base_link
     # Overridden to false by cobra_flex.launch.py when use_ekf:=true.
     publish_tf: true
+
+pan_tilt_driver:
+  ros__parameters:
+    baud: 1000000
+    pan_motor_id: 1
+    tilt_motor_id: 2
+    state_publish_rate: 20.0
+    run_calibration_ofs: false  # bench-only: rewrites servo center offsets
+    exercise_limits: true      # true -> sweep the limit box once at startup

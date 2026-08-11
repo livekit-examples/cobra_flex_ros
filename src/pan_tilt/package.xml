@@ -16,17 +16,20 @@
   limitations under the License.
 -->
 <package format="3">
-  <name>cobra_flex_bringup</name>
+  <name>cobra_flex_pan_tilt</name>
   <version>0.0.0</version>
-  <description>Launch and configuration for the Cobra Flex physical stack.</description>
+  <description>ROS 2 driver for the Feetech STS3215 pan/tilt head, wrapping the
+    PanTiltController from the LiveKit teleop pan_tilt_demo.</description>
   <maintainer email="stephen.derosa@livekit.io">Stephen DeRosa</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake_auto</buildtool_depend>
 
-  <exec_depend>cobra_flex_control</exec_depend>
-  <exec_depend>cobra_flex_driver</exec_depend>
-  <exec_depend>cobra_flex_localization</exec_depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>fmt</depend>
+
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

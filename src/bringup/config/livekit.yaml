@@ -1,0 +1,153 @@
+# yaml-language-server: $schema=../../../ros-portal/src/ros_portal_config/schema/ros_portal_config.schema.json
+# Copyright 2026 LiveKit
+
+ros_portal:
+  version: "0.0.1"
+  topic_polling_period_ms: 500
+
+  topics:
+    # Commands received from the controller (LiveKit -> ROS).
+    - topic: "/cobra_.*/cmd_vel"
+      direction: "in"
+
+    - topic: "/goal_pose"
+      direction: "in"
+
+    - topic: "/initialpose"
+      direction: "in"
+
+    - topic: "/clicked_point"
+      direction: "in"
+
+    # Telemetry / sensor / nav streams sent out to LiveKit (ROS -> LiveKit)
+    - topic: "/map"
+      direction: "out"
+
+    - topic: "/plan"
+      direction: "out"
+
+    - topic: "/robot_description"
+      direction: "out"
+
+    # Pan/tilt head servo positions (pan_tilt_driver publishes at 20 Hz).
+    - topic: "/joint_states"
+      direction: "out"
+      encoding: "jsonschema"
+
+    - topic: "/pan_tilt_velocity_cmd"
+      direction: "in"
+
+    - topic: "/scan"
+      direction: "out"
+
+    - topic: "/camera/image_raw"
+      direction: "out"
+
+    - topic: "/pose"
+      direction: "out"
+
+    - topic: "/slam_toolbox/graph_visualization"
+      direction: "out"
+
+    - topic: "/global_costmap/published_footprint"
+      direction: "out"
+
+    - topic: "/imu/data_raw"
+      max_rate_hz: 20
+      direction: "out"
+
+    - topic: "/odom"
+      direction: "out"
+      encoding: "jsonschema"
+
+    - topic: "/battery_state"
+      direction: "out"
+      encoding: "jsonschema"
+
+    - topic: "/headlights_state"
+      direction: "out"
+      encoding: "jsonschema"
+
+    # Transform tree — required so the controller's Foxglove 3D panel has a
+    # valid fixed frame (without it the click-to-publish tool is hidden).
+
+  video_sources:
+    # Synthetic test pattern — a known-good track for checking the LiveKit
+    # uplink independently of the camera hardware. Mirrors mipi_camera's
+    # resolution/framerate/bitrate so it is a drop-in comparison.
+    - track_name: "demo_camera"
+      source:
+        type: "gstreamer"
+        # videotestsrc pattern=smpte is the classic SMPTE 100% color bars with
+        # the television-snow block in the bottom right — an instantly
+        # recognizable reference for checking colors, scaling and tearing.
+        # clockoverlay stamps wall-clock date + time on every frame so uplink
+        # latency and frozen/stale video are obvious at a glance.
+        pipeline: >-
+          videotestsrc is-live=true do-timestamp=true pattern=smpte
+          ! video/x-raw,width=640,height=480,framerate=30/1
+          ! clockoverlay time-format="%Y-%m-%d %H:%M:%S" halignment=center
+          valignment=top shaded-background=true font-desc="Sans Bold 20"
+          ! videoconvert ! video/x-raw,format=I420
+          ! vp8enc name=lk_encoder deadline=1 cpu-used=8 keyframe-max-dist=30
+          lag-in-frames=0 target-bitrate=2500000
+          ! video/x-vp8
+          ! appsink name=lk_appsink sync=false max-buffers=2 drop=true
+        codec: "vp8"
+        resolution:
+          width: 640
+          height: 480
+        rate_control:
+          element: "lk_encoder"
+          property: "target-bitrate"
+          unit: "bps"
+      publish_options:
+        max_bitrate_bps: 2500000
+        max_framerate: 30
+
+    # Synthetic GStreamer test pattern (bouncing ball + timestamp overlay),
+    # software-encoded to VP8 — exercises the full GStreamer pipeline path
+    # without any camera hardware.
+    - track_name: "demo_gst_camera"
+      source:
+        type: "gstreamer"
+        pipeline: >-
+          videotestsrc is-live=true do-timestamp=true pattern=ball motion=wavy animation-mode=frames !
+          video/x-raw,width=1280,height=720,framerate=30/1 !
+          timeoverlay halignment=right valignment=bottom shaded-background=true !
+          videoconvert ! video/x-raw,format=I420 !
+          vp8enc name=lk_encoder deadline=1 cpu-used=8 keyframe-max-dist=30
+          lag-in-frames=0 target-bitrate=2500000 !
+          video/x-vp8 !
+          appsink name=lk_appsink sync=false max-buffers=2 drop=true
+        codec: "vp8"
+        resolution:
+          width: 1280
+          height: 720
+        rate_control:
+          element: "lk_encoder"
+          property: "target-bitrate"
+          unit: "bps"
+      publish_options:
+        max_bitrate_bps: 2500000
+        max_framerate: 30
+    # Side-by-side stereo USB camera (2x 1280x720), captured through the
+    # client-sdk-cpp device backend (V4L2) and encoded by WebRTC. The device
+    # is /dev/video0 (usb-3D_USB_Camera...-video-index0); V4L2 device ids are
+    # node numbers, so re-run 'ros2 run ros_portal capture_devices' if USB
+    # enumeration changes.
+    - track_name: "stereo_camera"
+      source:
+        type: "device"
+        device:
+          index: 0
+          format:
+            strategy: "exact"
+            resolution:
+              width: 2560
+              height: 720
+            framerate_fps: 60
+            frame_format: "mjpeg"
+      publish_options:
+        max_bitrate_bps: 4000000
+        max_framerate: 30

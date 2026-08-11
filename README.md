@@ -4,8 +4,13 @@
 > This repository is currently in Developer Preview mode and not ready for production use.
 > There may be bugs, and APIs and configuration options are subject to change during this period.
 
-ROS2 stack for the [Waveshare Cobra Flex](https://www.waveshare.com/wiki/Cobra_Flex)
-4WD chassis, driven from a Jetson Orin Nano over serial.
+ROS2 stack for the [Waveshare Cobra Flex](https://www.waveshare.com/wiki/Cobra_Flex).
+
+### Hardware:
+- jetson orin nano with docker
+- [3D UVC stereo camera](https://www.amazon.com/dp/B0F8NHFXDP?ref=cm_sw_r_cso_cp_apin_dp_K8B0CCVRQH2M453HY3KW&ref_=cm_sw_r_cso_cp_apin_dp_K8B0CCVRQH2M453HY3KW&social_share=cm_sw_r_cso_cp_apin_dp_K8B0CCVRQH2M453HY3KW&rsd=pwq31K690bBD29wgeYqjFaplBrmAEebKg4JJj0kz5maZTJFmV%2FQpxEZ%2FdWYlwzKhXvgcw1GLTCyW8Dw6jhbSJxx6%2FZ%2FuvP3c5DbBiIloN1kjPlQ%3D&edk=AQIDAHi1lw%2FM8UbbSMD9ScOOFEmBMHMthHeEhqDaQYPJUAX3jQHVsCNbySvJydPaciwfByEJAAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMuz57jXTsVM3%2FGVEzAgEQgDunDi8Ldglw%2BobSbsgZvPFTufnIgji5YHUsSBGe8dw0%2FB2dQ%2BvrsLPQMCnRuamTEi9Pv%2FqN7C94Hg%2B3Zg%3D%3D) 
+- (optional) pan/tilt component of the S101 lerobot arm.
+
 
 ## Packages
 
@@ -14,36 +19,43 @@ ROS2 stack for the [Waveshare Cobra Flex](https://www.waveshare.com/wiki/Cobra_F
 | `driver/` | `cobra_flex_driver` | Serial JSON bridge to the ESP32-S3 board: `cmd_vel` in; `wheel_states` (JointState) + `battery_state` (BatteryState) out. |
 | `control/` | `cobra_flex_control` | `wheel_odometry` node: integrates `wheel_states` into `odom/wheel` (nav_msgs/Odometry) + optional `odom -> base_link` TF. |
 | `localization/` | `cobra_flex_localization` | robot_localization EKF config. Wheel-odometry-only today; has a commented slot for a future IMU. |
+| `pan_tilt/` | `cobra_flex_pan_tilt` | Driver for the Feetech STS3215 pan/tilt head (vendored [teleop pan_tilt_demo](https://github.com/livekit-examples/teleop/tree/main/pan_tilt_demo) controller + SCServo SDK): `pan_tilt_position_cmd` / `pan_tilt_velocity_cmd` (JointState) in; `joint_states` out; `~/home` Trigger service. |
 | `bringup/` | `cobra_flex_bringup` | Launch + shared params tying the stack together. |
 
 ## Workspace setup
 
-This repo is designed to be cloned into a colcon workspace alongside
-[ros-portal](https://github.com/livekit/ros-portal), which is pulled in via
-the [vcs tool](https://github.com/dirk-thomas/vcstool) using
-[`cobra_flex.repos`](./cobra_flex.repos):
-
 ```bash
-mkdir -p cobra_ws/src && cd cobra_ws
-git clone git@github.com:livekit-examples/cobra_flex_ros.git src/cobra_flex_ros
+git clone git@github.com:livekit-examples/cobra_flex_ros.git
+mkdir -p src/externals/
+vcs import src/externals < external.repos
+```
 
-vcs import src < src/cobra_flex_ros/cobra_flex.repos   # brings in ros-portal
-vcs import src < src/ros-portal/external.repos         # ros_portal's own deps (client-sdk-cpp, cpp-tools, ...)
-
-# TEMPORARY: ros-portal still ships its own copy of the cobra_flex packages;
-# hide it so colcon doesn't see duplicate package names. Drop this once the
-# in-tree copy is removed upstream.
-touch src/ros-portal/src/test/cobra_flex/COLCON_IGNORE
-
-rosdep install --from-paths src --ignore-src -y
+Finally, build the workspace:
+```bash
 colcon build --packages-up-to cobra_flex_bringup
 ```
 
-The second `vcs import` (and building `ros_portal` itself) is only needed when
-running the LiveKit bridge with [`bringup/config/livekit.yaml`](./bringup/config/livekit.yaml);
-the bare robot stack builds without it. See the
-[ros-portal README](https://github.com/livekit/ros-portal#readme) for details
-on building and running `ros_portal`.
+### Docker
+Build the docker image:
+```bash
+docker compose build
+```
+This will build the cobra flex ros image and the cobra flex source.
+
+Run the docker compose file:
+From the repo root, run a dev cobra flex container and the ros portal:
+```bash
+LIVEKIT_URL=http://localhost:7880 LIVEKIT_TOKEN=test1234 docker compose up
+```
+you can optionally set a custom livekit config file  with `LIVEKIT_CONFIG`.
+
+`docker-compose.yml` mounts the compose-file directory at `/cobra_flex_ros` and binds
+`src/bringup/config/livekit.yaml` into the portal as `/tmp/cobra_flex_livekit.yaml`.
+Override the portal config with `LIVEKIT_CONFIG` if needed:
+```bash
+LIVEKIT_URL=http://localhost:7880 LIVEKIT_TOKEN=test1234 \
+  LIVEKIT_CONFIG=./src/bringup/config/livekit.yaml docker compose up
+```
 
 ## Hardware summary (wiki spec sheet)
 
@@ -59,6 +71,11 @@ on building and running `ros_portal`.
 - Sensors: wheel feedback and battery voltage only. **No IMU** on the chassis
   (unlike the WAVE ROVER) and no additional sensors installed yet.
 
+### Determine the serial port
+```bash
+python3 /cobra_flex_ros/src/bringup/scripts/identify_serial_ports.py
+```
+
 ## Usage
 
 ```bash
@@ -66,13 +83,18 @@ colcon build --packages-up-to cobra_flex_bringup
 source install/setup.bash
 
 # Driver + wheel odometry (wheel_odometry owns odom -> base_link):
-ros2 launch cobra_flex_bringup cobra_flex.launch.py serial_port:=/dev/ttyACM0
+ros2 launch cobra_flex_bringup cobra_flex.launch.py rover_port:=/dev/ttyACM0
 
 # Same, with the robot_localization EKF owning the transform:
 ros2 launch cobra_flex_bringup cobra_flex.launch.py use_ekf:=true
 
 # Teleop:
 ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+# With the pan/tilt head (install the udev rule once first, see below).
+# NOTE: the driver homes both servos to center on startup -- make sure the
+# arm is calibrated and free to move before enabling.
+ros2 launch cobra_flex_bringup cobra_flex.launch.py rover_port:=/dev/ttyACM0 pan_tilt_port:=/dev/ttyACM1
 ```
 
 Offline tests (no hardware; pure kinematics/odometry math):
@@ -95,6 +117,7 @@ colcon test-result --verbose
 4. Drive a measured straight line / in-place turn and compare against
    `odom/wheel`; tune covariances. Expect yaw over-reporting on in-place turns
    (skid-steer scrub).
+
 
 ## Known gaps / next steps
 

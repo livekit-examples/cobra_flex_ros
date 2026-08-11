@@ -1,0 +1,35 @@
+services:
+  cobra_flex_ros:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cobra_flex_ros:jazzy
+    container_name: cobra
+    network_mode: host
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - .:/cobra_flex_ros
+    working_dir: /cobra_flex_ros
+    command: ["tail", "-f", "/dev/null"]
+    stdin_open: true
+    tty: true
+
+  ros_portal:
+    image: livekit/ros-portal:jazzy-gst.sdd
+    container_name: ros_portal
+    network_mode: host
+    privileged: true
+    # Privileged gives access to host /dev, including /dev/video*
+    environment:
+      LIVEKIT_URL: ${LIVEKIT_URL:?Set LIVEKIT_URL}
+      LIVEKIT_TOKEN: ${LIVEKIT_TOKEN:?Set LIVEKIT_TOKEN}
+    volumes:
+      - /dev:/dev
+      - ${LIVEKIT_CONFIG:-./src/bringup/config/livekit.yaml}:/tmp/cobra_flex_livekit.yaml:ro
+    command:
+      - ros2
+      - launch
+      - ros_portal
+      - ros_portal.launch.py
+      - config_path:=/tmp/cobra_flex_livekit.yaml
