@@ -146,7 +146,7 @@ ros_portal:
             resolution:
               width: 2560
               height: 720
-            framerate_fps: 30
+            framerate_fps: 60
             frame_format: "mjpeg"
       publish_options:
         max_bitrate_bps: 4000000
