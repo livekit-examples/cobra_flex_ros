@@ -2,14 +2,14 @@ services:
   cobra_flex_ros:
     build:
       context: .
-      dockerfile: Dockerfile.lyrical
-    image: cobra_flex_ros:lyrical
+      dockerfile: Dockerfile
+    image: cobra_flex_ros:jazzy
     container_name: cobra
     network_mode: host
     privileged: true
     volumes:
       - /dev:/dev
-      - /home/jetson/workspaces/cobra_flex_ros:/cobra_flex_ros
+      - .:/cobra_flex_ros
     working_dir: /cobra_flex_ros
     command: ["tail", "-f", "/dev/null"]
     stdin_open: true
@@ -26,7 +26,7 @@ services:
       LIVEKIT_TOKEN: ${LIVEKIT_TOKEN:?Set LIVEKIT_TOKEN}
     volumes:
       - /dev:/dev
-      - /home/jetson/workspaces/cobra_flex_ros/src/bringup/config/livekit.yaml:/tmp/cobra_flex_livekit.yaml:ro
+      - ${LIVEKIT_CONFIG:-./src/bringup/config/livekit.yaml}:/tmp/cobra_flex_livekit.yaml:ro
     command:
       - ros2
       - launch

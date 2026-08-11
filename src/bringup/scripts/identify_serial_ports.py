@@ -177,8 +177,8 @@ def main() -> int:
             print(f"{r['device']:14} {label:14} serial={serial_no:12} {r['how']}")
         print()
         print('Stable paths for cobra_flex.launch.py:')
-        for role, arg in (('chassis', 'rover_serial_port'),
-                          ('pan_tilt', 'pan_tilt_serial_port')):
+        for role, arg in (('chassis', 'rover_port'),
+                          ('pan_tilt', 'pan_tilt_port')):
             path = found[role]['by_id'] if role in found else '<NOT FOUND>'
             print(f'  {arg}:={path}')
 

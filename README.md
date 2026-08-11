@@ -31,23 +31,25 @@ colcon build --packages-up-to cobra_flex_bringup
 ```
 
 ### Docker
-To run a dev cobra flex repo and the ros portal:
+Build the docker image:
+```bash
+docker compose build
+```
+This will build the cobra flex ros image and the cobra flex source.
+
+Run the docker compose file:
+From the repo root, run a dev cobra flex container and the ros portal:
 ```bash
 LIVEKIT_URL=http://localhost:7880 LIVEKIT_TOKEN=test1234 docker compose up
 ```
-then enter the container:
-```bash
-docker exec -it cobra bash
-```
+you can optionally set a custom livekit config file  with `LIVEKIT_CONFIG`.
 
-and run:
+`docker-compose.yml` mounts the compose-file directory at `/cobra_flex_ros` and binds
+`src/bringup/config/livekit.yaml` into the portal as `/tmp/cobra_flex_livekit.yaml`.
+Override the portal config with `LIVEKIT_CONFIG` if needed:
 ```bash
-sudo apt update && sudo apt install cargo -y
-sudo apt-get upgrade -y rustc
-
-cd /cobra_flex_ros
-rosdep update && sudo apt-get update && rosdep install --from-paths src --ignore-src -y
-  colcon build --packages-up-to cobra_flex_bringup
+LIVEKIT_URL=http://localhost:7880 LIVEKIT_TOKEN=test1234 \
+  LIVEKIT_CONFIG=./src/bringup/config/livekit.yaml docker compose up
 ```
 
 ## Hardware summary (wiki spec sheet)
@@ -64,9 +66,9 @@ rosdep update && sudo apt-get update && rosdep install --from-paths src --ignore
 - Sensors: wheel feedback and battery voltage only. **No IMU** on the chassis
   (unlike the WAVE ROVER) and no additional sensors installed yet.
 
-  ### Determine the serial port
+### Determine the serial port
 ```bash
-python3 cobra_flex_ros/src/bringup/scripts/identify_serial_ports.py
+python3 /cobra_flex_ros/src/bringup/scripts/identify_serial_ports.py
 ```
 
 ## Usage
@@ -76,7 +78,7 @@ colcon build --packages-up-to cobra_flex_bringup
 source install/setup.bash
 
 # Driver + wheel odometry (wheel_odometry owns odom -> base_link):
-ros2 launch cobra_flex_bringup cobra_flex.launch.py rover_serial_port:=/dev/ttyACM0
+ros2 launch cobra_flex_bringup cobra_flex.launch.py rover_port:=/dev/ttyACM0
 
 # Same, with the robot_localization EKF owning the transform:
 ros2 launch cobra_flex_bringup cobra_flex.launch.py use_ekf:=true
@@ -87,16 +89,7 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard
 # With the pan/tilt head (install the udev rule once first, see below).
 # NOTE: the driver homes both servos to center on startup -- make sure the
 # arm is calibrated and free to move before enabling.
-ros2 launch cobra_flex_bringup cobra_flex.launch.py use_pan_tilt:=true
-```
-
-Stable serial-port names (the chassis board and the pan/tilt servo adapter
-use identical CH343 USB-UART chips, so raw `ttyACM*` numbers shuffle across
-boots):
-
-```bash
-sudo cp bringup/udev/99-cobra-flex.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules && sudo udevadm trigger
+ros2 launch cobra_flex_bringup cobra_flex.launch.py rover_port:=/dev/ttyACM0 pan_tilt_port:=/dev/ttyACM1
 ```
 
 Offline tests (no hardware; pure kinematics/odometry math):
@@ -120,12 +113,6 @@ colcon test-result --verbose
    `odom/wheel`; tune covariances. Expect yaw over-reporting on in-place turns
    (skid-steer scrub).
 
-
-## Teleop Portal
-To control from the LiveKit Teleop Portal, you must remap /<id>/cmd_vel to /cmd_vel:
-```bash
-ros2 run topic_tools relay /<lk_participant_id>/cmd_vel /cmd_vel
-```
 
 ## Known gaps / next steps
 
