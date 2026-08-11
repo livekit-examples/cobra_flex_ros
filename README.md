@@ -4,8 +4,13 @@
 > This repository is currently in Developer Preview mode and not ready for production use.
 > There may be bugs, and APIs and configuration options are subject to change during this period.
 
-ROS2 stack for the [Waveshare Cobra Flex](https://www.waveshare.com/wiki/Cobra_Flex)
-4WD chassis, driven from a Jetson Orin Nano over serial.
+ROS2 stack for the [Waveshare Cobra Flex](https://www.waveshare.com/wiki/Cobra_Flex).
+
+### Hardware:
+- jetson orin nano with docker
+- [3D UVC stereo camera](https://www.amazon.com/dp/B0F8NHFXDP?ref=cm_sw_r_cso_cp_apin_dp_K8B0CCVRQH2M453HY3KW&ref_=cm_sw_r_cso_cp_apin_dp_K8B0CCVRQH2M453HY3KW&social_share=cm_sw_r_cso_cp_apin_dp_K8B0CCVRQH2M453HY3KW&rsd=pwq31K690bBD29wgeYqjFaplBrmAEebKg4JJj0kz5maZTJFmV%2FQpxEZ%2FdWYlwzKhXvgcw1GLTCyW8Dw6jhbSJxx6%2FZ%2FuvP3c5DbBiIloN1kjPlQ%3D&edk=AQIDAHi1lw%2FM8UbbSMD9ScOOFEmBMHMthHeEhqDaQYPJUAX3jQHVsCNbySvJydPaciwfByEJAAAAfjB8BgkqhkiG9w0BBwagbzBtAgEAMGgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMuz57jXTsVM3%2FGVEzAgEQgDunDi8Ldglw%2BobSbsgZvPFTufnIgji5YHUsSBGe8dw0%2FB2dQ%2BvrsLPQMCnRuamTEi9Pv%2FqN7C94Hg%2B3Zg%3D%3D) 
+- (optional) pan/tilt component of the S101 lerobot arm.
+
 
 ## Packages
 
