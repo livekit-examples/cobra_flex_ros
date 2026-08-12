@@ -17,7 +17,7 @@ services:
     tty: true
 
   ros_portal:
-    image: livekit/ros-portal:jazzy-v1.0.0-rc1
+    image: livekit/ros-portal:jazzy-v1.0.0-rc3
     container_name: ros_portal
     network_mode: host
     privileged: true
