@@ -96,6 +96,13 @@ def _launch_setup(context, *args, **kwargs):
             output='screen',
             arguments=[f'/{participant_id}/cmd_vel', '/cmd_vel'],
         ))
+        actions.append(Node(
+            package='topic_tools',
+            executable='relay',
+            name='odom_wheel_relay',
+            output='screen',
+            arguments=[f'/odom/wheel', '/odom'],
+        ))
     return actions
 
 
