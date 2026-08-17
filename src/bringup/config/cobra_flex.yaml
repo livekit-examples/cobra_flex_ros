@@ -31,6 +31,20 @@ pan_tilt_driver:
     baud: 1000000
     pan_motor_id: 1
     tilt_motor_id: 2
+    # Robot models built without a tilt motor set tilt_enabled: false; the axis
+    # is then skipped on the bus and dropped from joint_states.
+    pan_enabled: true
+    tilt_enabled: true
+    # Tick that reads as angle 0 per axis. Adjust for per-robot mounting
+    # variance in preference to run_calibration_ofs, which hides the offset in
+    # servo EEPROM. Travel (home +/- the limits below) must not cross the
+    # 0/4095 encoder wrap; the driver refuses to start if it does.
+    pan_home_ticks: 2048
+    tilt_home_ticks: 2048
+    pan_min_angle_deg: -75.0
+    pan_max_angle_deg: 75.0
+    tilt_min_angle_deg: -90.0
+    tilt_max_angle_deg: 90.0
     state_publish_rate: 20.0
     run_calibration_ofs: false  # bench-only: rewrites servo center offsets
     exercise_limits: true      # true -> sweep the limit box once at startup

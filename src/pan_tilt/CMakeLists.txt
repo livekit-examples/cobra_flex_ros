@@ -50,10 +50,12 @@ ament_auto_add_executable(pan_tilt_keyboard_teleop
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # pan_tilt_controller.* and the vendored SCServo SDK are verbatim upstream
-  # copies that must stay diffable; skip the C++ style linters, and run the
-  # copyright check only on the files this package authors (ament_copyright
-  # also cannot parse the upstream block-comment license headers).
+  # pan_tilt_controller.* was derived from the teleop pan_tilt_demo (and has
+  # since diverged), and the vendored SCServo SDK is a verbatim upstream copy
+  # that must stay diffable; skip the C++ style linters over both rather than
+  # reformatting them, and run the copyright check only on the files this
+  # package authors (ament_copyright also cannot parse the upstream
+  # block-comment license headers).
   list(APPEND AMENT_LINT_AUTO_EXCLUDE
     ament_cmake_uncrustify ament_cmake_cpplint ament_cmake_copyright)
   ament_lint_auto_find_test_dependencies()
@@ -62,4 +64,4 @@ if(BUILD_TESTING)
     "launch" "package.xml" "CMakeLists.txt")
 endif()
 
-ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR INSTALL_TO_SHARE launch)
+ament_auto_package(USE_SCOPED_HEADER_INSTALL_DIR INSTALL_TO_SHARE launch config)

@@ -1,0 +1,63 @@
+# Pan-only pan/tilt head: a single servo on the pan axis (motor index 0), free
+# to rotate very nearly a full turn in either direction from its home pose.
+#
+#   ros2 launch cobra_flex_pan_tilt pan_tilt.launch.py \
+#     params_file:=$(ros2 pkg prefix cobra_flex_pan_tilt)/share/cobra_flex_pan_tilt/config/pan_only.yaml \
+#     serial_port:=/dev/ttyACM1
+#
+# BEFORE RUNNING THIS
+#
+# 1. Open the servo's own EEPROM angle limits. The stock heads ship limited to
+#    ticks [1024, 3071] (+/-90 deg); the servo clamps position commands to that
+#    range regardless of what this file says, so moves past it never arrive and
+#    the driver times out waiting. Widen them with the Feetech SetLimits tool.
+# 2. Check the camera cabling can survive ~360 deg of rotation. Nothing in the
+#    driver knows about a cable; the overcurrent watchdog only trips once the
+#    cable is already taut.
+#
+# WHY 179.9 AND NOT 180
+#
+# Travel is measured in encoder ticks, 4096 to a revolution, and the driver
+# refuses a range that crosses the 0/4095 wrap (a target on the far side of the
+# seam would silently command the long way around). Home sits at tick 2048, so
+# +/-180 deg spans ticks [0, 4096] -- 4097 positions, one more than exist. The
+# widest legal range is 4096 positions, i.e. 359.91 deg.
+#
+# Splitting that evenly gives the +/-179.9 deg below (ticks 1..4095). You can
+# reclaim the last tick with pan_min_angle_deg: -180.0 (ticks 0..4095), but
+# then the minimum extreme sits exactly a half-turn from home, and joint_states
+# reports it as +180 deg rather than -180 -- the (-pi, pi] reduction resolves
+# the tie to the positive side. The symmetric range keeps commanded and
+# reported signs consistent, which is worth more than 0.09 deg.
+
+pan_tilt_driver:
+  ros__parameters:
+    baud: 1000000
+
+    # Pan axis (motor index 0) only; no servo is expected on the tilt ID, and
+    # tilt_joint is dropped from joint_states and ignored on both command
+    # topics.
+    pan_enabled: true
+    tilt_enabled: false
+
+    # Servo bus ID, not the axis index -- the pan axis is index 0 by
+    # construction. 1 is the stock ID for the pan servo; change it here if this
+    # head's servo was re-IDed.
+    pan_motor_id: 1
+
+    # Tick that reads as angle 0. Home the servo where you want zero to be and
+    # leave this at the centre tick; the +/-179.9 deg travel below then spans
+    # the whole encoder frame without touching the wrap.
+    pan_home_ticks: 2048
+    pan_min_angle_deg: -179.9
+    pan_max_angle_deg: 179.9
+
+    state_publish_rate: 20.0
+
+    # Off by default here: the self-test drives to both extremes, which on this
+    # axis means winding the head nearly a full turn each way. Enable it only
+    # once you have confirmed the cabling tolerates that.
+    exercise_limits: false
+
+    # Bench-only; rewrites the servo's EEPROM centre offset.
+    run_calibration_ofs: false

@@ -42,8 +42,8 @@ int circularDistanceTicks(const int a, const int b) {
 
 PanTiltController::PanTiltController(
     const std::string &serial_port,
-    const std::array<u8, kMotorCount> &motor_ids, const int baud)
-    : serial_port_(serial_port), motor_ids_(motor_ids), baud_(baud),
+    const std::array<AxisConfig, kMotorCount> &axes, const int baud)
+    : serial_port_(serial_port), axes_(axes), baud_(baud),
       opened_(false), watchdog_stop_requested_(false),
       watchdog_running_(false) {
   for (auto &mode : motor_bus_mode_) {
@@ -61,6 +61,11 @@ PanTiltController::~PanTiltController() {
 }
 
 bool PanTiltController::initialize(const bool run_calibration_ofs) {
+  // Validate before opening: a bad geometry config should fail without
+  // energizing a motor that might then be driven into a hard stop.
+  if (!validateAxes()) {
+    return false;
+  }
   if (!open()) {
     return false;
   }
@@ -85,36 +90,64 @@ bool PanTiltController::initialize(const bool run_calibration_ofs) {
 }
 
 bool PanTiltController::exerciseLimits() {
-  WriteLine(std::cout, "[pan_tilt] Exercising motion limits (4 corners)");
+  // Waypoints hold one offset-from-home target per axis; entries for absent
+  // axes are never read.
+  using Waypoint = std::array<double, kMotorCount>;
+  std::array<Waypoint, 4> waypoints{};
+  int waypoint_count = 0;
 
-  struct Corner {
-    double pan_from_home_rad;
-    double tilt_from_home_rad;
+  const auto extremes = [this](const int motor_index) {
+    return std::array<double, 2>{axes_[motor_index].max_from_home_rad,
+                                 axes_[motor_index].min_from_home_rad};
   };
-  const std::array<Corner, 4> corners = {{
-      {kPanMaxAngleFromHomeRad, kTiltMaxAngleFromHomeRad},
-      {kPanMinAngleFromHomeRad, kTiltMaxAngleFromHomeRad},
-      {kPanMinAngleFromHomeRad, kTiltMinAngleFromHomeRad},
-      {kPanMaxAngleFromHomeRad, kTiltMinAngleFromHomeRad},
-  }};
 
-  for (const auto &corner : corners) {
-    if (!setMotorAngleFromHome(kPanIndex, corner.pan_from_home_rad) ||
-        !setMotorAngleFromHome(kTiltIndex, corner.tilt_from_home_rad)) {
-      WriteLine(std::cerr, "[pan_tilt] exerciseLimits failed to command corner");
-      return false;
+  if (axes_[kPanIndex].present && axes_[kTiltIndex].present) {
+    const auto pan = extremes(kPanIndex);
+    const auto tilt = extremes(kTiltIndex);
+    // Serpentine order: hold tilt at an extreme, sweep pan across, step tilt,
+    // sweep pan back. Reproduces the historical corner ordering
+    // (max/max -> min/max -> min/min -> max/min).
+    for (int t = 0; t < 2; ++t) {
+      for (int p = 0; p < 2; ++p) {
+        Waypoint &waypoint = waypoints[waypoint_count++];
+        waypoint[kPanIndex] = pan[(t == 0) ? p : 1 - p];
+        waypoint[kTiltIndex] = tilt[t];
+      }
+    }
+  } else {
+    // Single-axis head: the limit box degenerates to a line segment.
+    const int motor_index = axes_[kPanIndex].present ? kPanIndex : kTiltIndex;
+    for (const double extreme : extremes(motor_index)) {
+      waypoints[waypoint_count++][motor_index] = extreme;
+    }
+  }
+
+  WriteLine(std::cout, "[pan_tilt] Exercising motion limits ({} waypoints)",
+            waypoint_count);
+
+  for (int w = 0; w < waypoint_count; ++w) {
+    for (int i = 0; i < kMotorCount; ++i) {
+      if (!axes_[i].present) {
+        continue;
+      }
+      if (!setMotorAngleFromHome(i, waypoints[w][i])) {
+        WriteLine(std::cerr,
+                  "[pan_tilt] exerciseLimits failed to command waypoint");
+        return false;
+      }
     }
 
-    const int pan_target =
-        angleFromHomeToTicks(kPanIndex, corner.pan_from_home_rad);
-    const int tilt_target =
-        angleFromHomeToTicks(kTiltIndex, corner.tilt_from_home_rad);
-    if (!waitForMotorPositionMoveComplete(kPanIndex, pan_target,
-                                          kBlockingTimeoutMs) ||
-        !waitForMotorPositionMoveComplete(kTiltIndex, tilt_target,
-                                          kBlockingTimeoutMs)) {
-      WriteLine(std::cerr, "[pan_tilt] exerciseLimits corner move did not settle");
-      return false;
+    for (int i = 0; i < kMotorCount; ++i) {
+      if (!axes_[i].present) {
+        continue;
+      }
+      const int target_ticks = angleFromHomeToTicks(i, waypoints[w][i]);
+      if (!waitForMotorPositionMoveComplete(i, target_ticks,
+                                            kBlockingTimeoutMs)) {
+        WriteLine(std::cerr,
+                  "[pan_tilt] exerciseLimits waypoint move did not settle");
+        return false;
+      }
     }
   }
 
@@ -123,10 +156,13 @@ bool PanTiltController::exerciseLimits() {
 
 bool PanTiltController::homeMotors() {
   const std::lock_guard<std::recursive_mutex> lock(bus_mutex_);
-  WriteLine(std::cout, "[pan_tilt] Homing motors (pan -> {} ticks, tilt -> {} ticks)",
-            homeTicks(kPanIndex), homeTicks(kTiltIndex));
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     const int id = motorId(i);
+    WriteLine(std::cout, "[pan_tilt] Homing {} (ID {}) to {} ticks",
+              axes_[i].name, id, homeTicks(i));
     // The motors may be in wheel (velocity) mode; WritePosEx sent in wheel
     // mode is misinterpreted as continuous rotation and runs to the stops.
     if (!ensureServoMode(i)) {
@@ -143,6 +179,9 @@ bool PanTiltController::homeMotors() {
   }
 
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     if (!waitForMotorPositionMoveComplete(i, homeTicks(i), 3000)) {
       WriteLine(std::cerr, "[pan_tilt] Home move failed for ID {}", motorId(i));
       return false;
@@ -178,23 +217,99 @@ bool PanTiltController::setMotorAngle(const int motor_index,
 }
 
 double PanTiltController::clampAngleFromHomeRad(
-    const int motor_index, const double angle_from_home_rad) {
-  const double limit_a = (motor_index == 0) ? kPanMinAngleFromHomeRad
-                                            : kTiltMinAngleFromHomeRad;
-  const double limit_b = (motor_index == 0) ? kPanMaxAngleFromHomeRad
-                                            : kTiltMaxAngleFromHomeRad;
-  // The named min/max constants may be configured in either numeric order, so
-  // derive the actual bounds here. std::clamp has undefined behavior if the
-  // lower bound exceeds the upper bound.
-  const auto [lo, hi] = std::minmax(limit_a, limit_b);
+    const int motor_index, const double angle_from_home_rad) const {
+  // The configured min/max may arrive in either numeric order, so derive the
+  // actual bounds here. std::clamp has undefined behavior if the lower bound
+  // exceeds the upper bound.
+  const auto [lo, hi] = std::minmax(axes_[motor_index].min_from_home_rad,
+                                    axes_[motor_index].max_from_home_rad);
   return std::clamp(angle_from_home_rad, lo, hi);
 }
 
-int PanTiltController::angleFromHomeToTicks(const int motor_index,
-                                           const double angle_from_home_rad) {
+int PanTiltController::angleFromHomeToTicks(
+    const int motor_index, const double angle_from_home_rad) const {
   const double clamped_rad =
       clampAngleFromHomeRad(motor_index, angle_from_home_rad);
   return wrapTicks(homeTicks(motor_index) + angleRadToTicks(clamped_rad));
+}
+
+double PanTiltController::ticksToAngleFromHomeRad(const int motor_index,
+                                                  const int ticks) const {
+  // The STS3215 position register accumulates multi-turn counts after
+  // wheel-mode (velocity) driving, so reduce to a within-revolution tick
+  // first, then take the shortest signed distance from home so the reported
+  // angle always lands in (-pi, pi]. C++ % is negative for negative operands
+  // (wheel-mode multi-turn positions go negative), so normalize into
+  // [0, kTicksPerRevolution) before recentering.
+  int delta = (ticks - homeTicks(motor_index)) % kTicksPerRevolution;
+  if (delta < 0) {
+    delta += kTicksPerRevolution;
+  }
+  if (delta > kTicksPerRevolution / 2) {
+    delta -= kTicksPerRevolution;
+  }
+  return ticksToAngleRad(delta);
+}
+
+bool PanTiltController::validateAxes() const {
+  bool any_present = false;
+  for (int i = 0; i < kMotorCount; ++i) {
+    const AxisConfig &axis = axes_[i];
+    if (!axis.present) {
+      continue;
+    }
+    any_present = true;
+
+    if (axis.home_ticks < 0 || axis.home_ticks >= kTicksPerRevolution) {
+      WriteLine(std::cerr,
+                "[pan_tilt] {}: home_ticks {} outside [0, {})", axis.name,
+                axis.home_ticks, kTicksPerRevolution);
+      return false;
+    }
+    if (!std::isfinite(axis.min_from_home_rad) ||
+        !std::isfinite(axis.max_from_home_rad) ||
+        axis.min_from_home_rad >= axis.max_from_home_rad) {
+      WriteLine(std::cerr,
+                "[pan_tilt] {}: limits [{}, {}] rad are not a finite, "
+                "increasing range",
+                axis.name, axis.min_from_home_rad, axis.max_from_home_rad);
+      return false;
+    }
+    // Beyond +/-pi the shortest-signed-distance reduction in
+    // ticksToAngleFromHomeRad() aliases to the wrong sign, so reported
+    // positions would fight commanded ones.
+    if (axis.min_from_home_rad < -kPi || axis.max_from_home_rad > kPi) {
+      WriteLine(std::cerr,
+                "[pan_tilt] {}: limits [{}, {}] rad exceed +/-pi", axis.name,
+                axis.min_from_home_rad, axis.max_from_home_rad);
+      return false;
+    }
+    // Travel must not cross the 0/4095 encoder wrap: angleFromHomeToTicks()
+    // wraps the target, so a range straddling the seam would silently command
+    // the long way around.
+    const int min_ticks =
+        axis.home_ticks + angleRadToTicks(axis.min_from_home_rad);
+    const int max_ticks =
+        axis.home_ticks + angleRadToTicks(axis.max_from_home_rad);
+    if (min_ticks < 0 || max_ticks >= kTicksPerRevolution) {
+      WriteLine(std::cerr,
+                "[pan_tilt] {}: travel spans ticks [{}, {}], which crosses the "
+                "0/{} encoder wrap (home_ticks={})",
+                axis.name, min_ticks, max_ticks, kTicksPerRevolution - 1,
+                axis.home_ticks);
+      return false;
+    }
+  }
+
+  if (!any_present) {
+    WriteLine(std::cerr, "[pan_tilt] No axis is configured as present");
+    return false;
+  }
+  return true;
+}
+
+int PanTiltController::homeTicks(const int motor_index) const {
+  return axes_[motor_index].home_ticks;
 }
 
 bool PanTiltController::setMotorAngleFromHome(const int motor_index,
@@ -214,8 +329,7 @@ bool PanTiltController::setMotorAngleFromHome(const int motor_index,
     WriteLine(std::cerr,
               "[pan_tilt] Position request {} rad clamped to {} rad (limits) "
               "for motor {}",
-              angle_from_home_rad, clamped_rad, (motor_index == 0 ? "pan" : "tilt"));
-         
+              angle_from_home_rad, clamped_rad, axes_[motor_index].name);
   }
 
   const std::lock_guard<std::recursive_mutex> lock(bus_mutex_);
@@ -348,6 +462,9 @@ bool PanTiltController::setVelocity(const int motor_index,
 
 bool PanTiltController::haltMotors(const u8 acc) {
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     if (!setVelocity(i, 0, acc)) {
       WriteLine(std::cerr, "[pan_tilt] halt failed for motor index {}", i);
       return false;
@@ -404,6 +521,9 @@ bool PanTiltController::resyncServoHold() {
   const std::lock_guard<std::recursive_mutex> lock(bus_mutex_);
   bool all_ok = true;
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     const int id = motorId(i);
     if (!ensureServoMode(i)) {
       all_ok = false;
@@ -443,6 +563,9 @@ PanTiltController::pollState() {
   std::array<ServoState, kMotorCount> states{};
 
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     const int id = motorId(i);
     ServoState &state = states[i];
     state.motor_id = id;
@@ -469,6 +592,8 @@ PanTiltController::pollState() {
       continue;
     }
     state.tracked_ticks = updateTracking(i, state.position_ticks);
+    state.angle_from_home_rad =
+        ticksToAngleFromHomeRad(i, state.tracked_ticks);
   }
 
   return states;
@@ -476,30 +601,26 @@ PanTiltController::pollState() {
 
 bool PanTiltController::printAngles() {
   const auto states = pollState();
-  const ServoState &pan = states[0];
-  const ServoState &tilt = states[1];
 
-  if (!pan.valid || !tilt.valid) {
-    WriteLine(std::cerr,
-              "[pan_tilt] printAngles failed: invalid state "
-              "(pan valid={}, tilt valid={})",
-              pan.valid, tilt.valid);
-    return false;
+  bool all_ok = true;
+  for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
+    const ServoState &state = states[i];
+    if (!state.valid) {
+      WriteLine(std::cerr, "[pan_tilt] printAngles: invalid state for {}",
+                axes_[i].name);
+      all_ok = false;
+      continue;
+    }
+    WriteLine(std::cout,
+              "[pan_tilt] Angles  {}: relative={:.2f} deg global={:.2f} deg",
+              axes_[i].name,
+              ticksToAngleDeg(state.position_ticks - homeTicks(i)),
+              ticksToAngleDeg(state.position_ticks));
   }
-
-  const double pan_global_deg = ticksToAngleDeg(pan.position_ticks);
-  const double tilt_global_deg = ticksToAngleDeg(tilt.position_ticks);
-  const double pan_relative_deg =
-      ticksToAngleDeg(pan.position_ticks - homeTicks(kPanIndex));
-  const double tilt_relative_deg =
-      ticksToAngleDeg(tilt.position_ticks - homeTicks(kTiltIndex));
-
-  WriteLine(std::cout,
-            "[pan_tilt] Angles  relative: pan={:.2f} deg tilt={:.2f} deg | "
-            "global: pan={:.2f} deg tilt={:.2f} deg",
-            pan_relative_deg, tilt_relative_deg, pan_global_deg,
-            tilt_global_deg);
-  return true;
+  return all_ok;
 }
 
 bool PanTiltController::waitForMotorPositionMoveComplete(const int motor_index,
@@ -609,8 +730,9 @@ void PanTiltController::watchdogThreadMain() {
     // to halt.
     bool any_motor_in_wheel_mode = false;
     for (int i = 0; i < kMotorCount; ++i) {
-      any_motor_in_wheel_mode |= motor_bus_mode_[i].load() ==
-                                 static_cast<int>(BusMode::kWheel);
+      any_motor_in_wheel_mode |= axes_[i].present &&
+                                 motor_bus_mode_[i].load() ==
+                                     static_cast<int>(BusMode::kWheel);
     }
     const auto time_since_last_user_input_velocity_set =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -627,6 +749,9 @@ void PanTiltController::watchdogThreadMain() {
       resyncServoHold();
     }
     for (int i = 0; i < kMotorCount; ++i) {
+      if (!axes_[i].present) {
+        continue;
+      }
       int current_milliamps = -1;
       if (!readMotorCurrentMilliamps(i, current_milliamps)) {
         continue;
@@ -656,6 +781,9 @@ void PanTiltController::watchdogThreadMain() {
                     "disabling torque",
                     id);
           for (int m = 0; m < kMotorCount; ++m) {
+            if (!axes_[m].present) {
+              continue;
+            }
             if (!disableMotorTorque(m)) {
               WriteLine(
                   std::cerr,
@@ -740,6 +868,9 @@ bool PanTiltController::ensureServoMode(const int motor_index) {
 bool PanTiltController::initMotors() {
   const std::lock_guard<std::recursive_mutex> lock(bus_mutex_);
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     const int id = motorId(i);
     // Individual bus transactions fail transiently (stale adapter buffers on
     // reopen, EMI from the motors), so retry before declaring the motor dead.
@@ -765,6 +896,9 @@ bool PanTiltController::initMotors() {
 bool PanTiltController::pingMotors() {
   const std::lock_guard<std::recursive_mutex> lock(bus_mutex_);
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     const int id = motorId(i);
     bool ok = false;
     for (int attempt = 0; attempt < kInitRetryCount && !ok; ++attempt) {
@@ -786,6 +920,9 @@ bool PanTiltController::pingMotors() {
 bool PanTiltController::ensureFeedback() {
   const auto states = pollState();
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     const ServoState &state = states[i];
     if (!state.valid) {
       WriteLine(std::cerr, "[pan_tilt] Feedback validation failed for ID {}",
@@ -803,6 +940,9 @@ bool PanTiltController::ensureFeedback() {
 bool PanTiltController::runCalibrationOfs() {
   const std::lock_guard<std::recursive_mutex> lock(bus_mutex_);
   for (int i = 0; i < kMotorCount; ++i) {
+    if (!axes_[i].present) {
+      continue;
+    }
     const int id = motorId(i);
     if (!sms_sts_.CalibrationOfs(static_cast<u8>(id))) {
       WriteLine(std::cerr, "[pan_tilt] CalibrationOfs failed for ID {}", id);
@@ -818,9 +958,17 @@ bool PanTiltController::isValidMotorIndex(const int motor_index) const {
     WriteLine(std::cerr, "[pan_tilt] Invalid motor index {}", motor_index);
     return false;
   }
+  // Single choke point for absent axes: every command path already guards on
+  // this, so an unconfigured axis rejects commands instead of talking to a
+  // motor ID that is not on the bus.
+  if (!axes_[motor_index].present) {
+    WriteLine(std::cerr, "[pan_tilt] Motor index {} is not configured present",
+              motor_index);
+    return false;
+  }
   return true;
 }
 
 int PanTiltController::motorId(const int motor_index) const {
-  return static_cast<int>(motor_ids_[motor_index]);
+  return static_cast<int>(axes_[motor_index].motor_id);
 }

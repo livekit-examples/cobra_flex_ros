@@ -32,8 +32,9 @@
  *
  * @details
  * This class owns the SMS_STS transport lifecycle (open/close), validates bus
- * connectivity, and exposes simple application-level control methods for two
- * motors:
+ * connectivity, and exposes simple application-level control methods for up to
+ * two motors (either axis may be marked absent -- see AxisConfig::present -- so
+ * a pan-only head is supported):
  * - Initialize motors (mode + torque)
  * - Verify each motor responds to Ping and feedback reads
  * - Optionally run center calibration (CalibrationOfs)
@@ -53,21 +54,15 @@ public:
   static constexpr double kPi = 3.14159265358979323846;
   static constexpr int kServoCenterTicks = 2048;
   static constexpr int kQuarterTurnTicks = kTicksPerRevolution / 4; // 90 deg
-  // Both axes home at the servo center tick. The tilt servo is calibrated
+  // Default home tick for both axes. The tilt servo is calibrated
   // (CalibrationOfs) so the camera-level pose reads the center tick; the
   // +/-90 deg travel then spans ticks 1024..3072, matching the servo's
   // EEPROM angle limits [1024, 3071] and staying clear of the 0/4095
-  // encoder wrap dead-zone.
+  // encoder wrap dead-zone. Per-robot variance is better expressed as an
+  // AxisConfig::home_ticks offset than as another EEPROM calibration, which
+  // is invisible from config and travels with the servo.
   static constexpr int kPanHomeTicks = kServoCenterTicks;
   static constexpr int kTiltHomeTicks = kServoCenterTicks;
-
-  /**
-   * @brief Home/zero tick position for a motor index.
-   * @param motor_index 0=pan, 1=tilt
-   */
-  static constexpr int homeTicks(const int motor_index) {
-    return motor_index == 0 ? kPanHomeTicks : kTiltHomeTicks;
-  }
 
   static constexpr u16 kDefaultMoveSpeed =
       1000; //  Moving speed (0-3400 steps/s)
@@ -90,6 +85,26 @@ public:
   static constexpr double kTiltMinAngleFromHomeRad = -kPi / 2.0; // -90 deg (down)
 
   /**
+   * @brief Per-axis hardware and geometry configuration.
+   *
+   * Defaults reproduce the historical hard-coded pan behaviour; the caller is
+   * expected to fill in tilt's wider travel (see kTilt*AngleFromHomeRad).
+   * Marking an axis `present = false` omits it from every bus transaction, so
+   * a head built with only a pan motor initializes and runs normally.
+   */
+  struct AxisConfig {
+    bool present{true};
+    u8 motor_id{0};
+    // Tick that reads as angle 0 for this axis.
+    int home_ticks{kServoCenterTicks};
+    double min_from_home_rad{kPanMinAngleFromHomeRad};
+    double max_from_home_rad{kPanMaxAngleFromHomeRad};
+    // Human-readable axis name used in log messages only. Not copied, so it
+    // must outlive the controller -- pass a string literal.
+    const char *name{"axis"};
+  };
+
+  /**
    * @brief Snapshot of a single servo's most recent state.
    *
    * Values map directly to SMS/STS feedback registers returned by FeedBack():
@@ -103,6 +118,9 @@ public:
     // read at init/home, then advanced by wrapped per-poll deltas. Immune to
     // the wheel-mode multi-turn count slips that corrupt position_ticks.
     int tracked_ticks{-1};
+    // Angle measured from this axis' home tick, reduced to (-pi, pi]. Derived
+    // from tracked_ticks, so it inherits its immunity to wheel-mode slips.
+    double angle_from_home_rad{0.0};
     int speed{-1};
     int load_pwm{-1};
     int voltage_01v{-1};
@@ -113,10 +131,12 @@ public:
   };
 
   /**
-   * @brief Construct a controller for a serial port and two motor IDs.
+   * @brief Construct a controller for a serial port and per-axis config.
+   * @param axes Index 0 = pan, index 1 = tilt. Axes with `present = false`
+   * are skipped entirely; the configuration is validated by initialize().
    */
   PanTiltController(const std::string &serial_port,
-                    const std::array<u8, kMotorCount> &motor_ids,
+                    const std::array<AxisConfig, kMotorCount> &axes,
                     int baud = kDefaultBaud);
 
   /**
@@ -128,26 +148,29 @@ public:
   PanTiltController &operator=(const PanTiltController &) = delete;
 
   /**
-   * @brief Open bus, init motors, verify ping+feedback, optional calibration,
-   * then home.
+   * @brief Validate config, open bus, init motors, verify ping+feedback,
+   * optional calibration, then home.
    * @param run_calibration_ofs If true, runs CalibrationOfs on each motor
    * before homing.
-   * @return true on success, false on any failed hardware operation.
+   * @return true on success, false on an invalid configuration or any failed
+   * hardware operation.
    */
   bool initialize(bool run_calibration_ofs);
 
   /**
-   * @brief Command both motors to their per-axis home tick position.
+   * @brief Command every present motor to its per-axis home tick position.
    */
   bool homeMotors();
 
   /**
-   * @brief Sweep both motors through the four corners of the software limit
+   * @brief Sweep the present motors through the corners of the software limit
    * box, then return home.
    *
-   * Moves (blocking, in order) to: max tilt/max pan, max tilt/min pan,
-   * min tilt/min pan, min tilt/max pan, then calls homeMotors(). Useful as a
-   * startup self-test to verify the full range of motion is unobstructed.
+   * With both axes present, moves (blocking, in order) to: max tilt/max pan,
+   * max tilt/min pan, min tilt/min pan, min tilt/max pan. With a single axis
+   * present the sweep degenerates to that axis' max then min. Finishes with
+   * homeMotors(). Useful as a startup self-test to verify the full range of
+   * motion is unobstructed.
    * @return true if every corner is reached and the final home succeeds.
    */
   bool exerciseLimits();
@@ -309,6 +332,11 @@ private:
    */
   int motorId(int motor_index) const;
   /**
+   * @brief Home/zero tick position for a motor index.
+   * @param motor_index 0=pan, 1=tilt
+   */
+  int homeTicks(int motor_index) const;
+  /**
    * @brief Start the watchdog thread
    */
   void startWatchdogThread();
@@ -349,15 +377,35 @@ private:
    * @param angle_from_home_rad Requested offset from home in radians
    * @return the clamped offset in radians
    */
-  static double clampAngleFromHomeRad(int motor_index,
-                                      double angle_from_home_rad);
+  double clampAngleFromHomeRad(int motor_index,
+                               double angle_from_home_rad) const;
   /**
    * @brief Convert a clamped offset-from-home angle to absolute servo ticks.
    * @param motor_index The motor index (0=pan, 1=tilt)
    * @param angle_from_home_rad Requested offset from home in radians
    * @return the absolute target position in servo ticks
    */
-  static int angleFromHomeToTicks(int motor_index, double angle_from_home_rad);
+  int angleFromHomeToTicks(int motor_index, double angle_from_home_rad) const;
+  /**
+   * @brief Convert an absolute tick reading to an offset-from-home angle.
+   *
+   * The position register accumulates multi-turn counts after wheel-mode
+   * driving, so the raw difference is reduced to the shortest signed distance
+   * from home and always lands in (-pi, pi].
+   * @param motor_index The motor index (0=pan, 1=tilt)
+   * @param ticks Absolute (or dead-reckoned) position in servo ticks
+   * @return the offset from home in radians
+   */
+  double ticksToAngleFromHomeRad(int motor_index, int ticks) const;
+  /**
+   * @brief Validate the per-axis configuration before touching the bus.
+   *
+   * Rejects configurations whose travel would cross the 0/4095 encoder wrap,
+   * exceed the +/-pi range the shortest-distance reduction can represent, or
+   * leave no axis present at all.
+   * @return true if the configuration is usable
+   */
+  bool validateAxes() const;
 
   /**
    * @brief Wrap the ticks
@@ -407,7 +455,7 @@ private:
   enum class BusMode { kUnknown = 0, kServo = 1, kWheel = 2 };
 
   std::string serial_port_;
-  std::array<u8, kMotorCount> motor_ids_;
+  std::array<AxisConfig, kMotorCount> axes_;
   int baud_;
   SMS_STS sms_sts_;
   bool opened_;
