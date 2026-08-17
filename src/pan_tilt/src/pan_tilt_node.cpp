@@ -15,9 +15,14 @@
 /**
  * @brief ROS 2 driver for the Feetech STS3215 pan/tilt head.
  *
- * Thin rclcpp shim around PanTiltController (copied verbatim from the LiveKit
- * teleop pan_tilt_demo), which owns the serial bus, software angle limits,
- * overcurrent protection, and a velocity deadman watchdog.
+ * Thin rclcpp shim around PanTiltController (originally derived from the
+ * LiveKit teleop pan_tilt_demo, since diverged), which owns the serial bus,
+ * software angle limits, overcurrent protection, and a velocity deadman
+ * watchdog.
+ *
+ * Axis geometry (motor ID, home tick, travel limits) and presence are
+ * per-robot parameters, so a head with only a pan motor is supported via
+ * tilt_enabled:=false.
  *
  * Interface (all angles rad from home/center, velocities rad/s):
  *  - sub  pan_tilt_position_cmd  sensor_msgs/JointState (position field;
@@ -60,22 +65,8 @@ s16 radPerSecToServoStepsPerSec(const double rad_per_sec) {
   return static_cast<s16>(std::lround(clamped_steps));
 }
 
-double ticksFromHomeToRad(const int motor_index, const int ticks) {
-  // The STS3215 position register accumulates multi-turn counts after
-  // wheel-mode (velocity) driving, so reduce to a within-revolution tick
-  // first, then take the shortest signed distance from home so the
-  // published angle always lands in (-pi, pi].
-  constexpr int kRev = PanTiltController::kTicksPerRevolution;
-  // C++ % is negative for negative operands (wheel-mode multi-turn positions
-  // go negative), so normalize into [0, kRev) before recentering.
-  int delta = (ticks - PanTiltController::homeTicks(motor_index)) % kRev;
-  if (delta < 0) {
-    delta += kRev;
-  }
-  if (delta > kRev / 2) {
-    delta -= kRev;
-  }
-  return delta * kTwoPi / kRev;
+double degToRad(const double degrees) {
+  return degrees * PanTiltController::kPi / 180.0;
 }
 
 double stepsPerSecToRadPerSec(const int steps_per_sec) {
@@ -94,14 +85,29 @@ public:
     declare_parameter("baud", PanTiltController::kDefaultBaud);
     declare_parameter("pan_motor_id", 1);
     declare_parameter("tilt_motor_id", 2);
+    // Robot models without a tilt motor set tilt_enabled:=false; the axis is
+    // then omitted from every bus transaction and from joint_states.
+    declare_parameter("pan_enabled", true);
+    declare_parameter("tilt_enabled", true);
+    // Tick that reads as angle 0 for each axis. Prefer adjusting this over
+    // run_calibration_ofs for per-robot mounting variance: it lives in config
+    // rather than in the servo's EEPROM.
+    declare_parameter("pan_home_ticks", PanTiltController::kPanHomeTicks);
+    declare_parameter("tilt_home_ticks", PanTiltController::kTiltHomeTicks);
+    // Software travel limits, as an offset from the home tick.
+    declare_parameter("pan_min_angle_deg", -75.0);
+    declare_parameter("pan_max_angle_deg", 75.0);
+    declare_parameter("tilt_min_angle_deg", -90.0);
+    declare_parameter("tilt_max_angle_deg", 90.0);
     declare_parameter("pan_joint_name", "pan_joint");
     declare_parameter("tilt_joint_name", "tilt_joint");
     declare_parameter("state_publish_rate", 20.0);  // Hz
     // Runs CalibrationOfs during init (writes the current pose as center to
     // the servo EEPROM) -- bench operation, leave false in normal use.
     declare_parameter("run_calibration_ofs", false);
-    // Sweeps the four corners of the software limit box after init as a
-    // startup self-test that the range of motion is unobstructed.
+    // Sweeps the software limit box after init as a startup self-test that the
+    // range of motion is unobstructed (four corners with both axes present,
+    // two endpoints with one).
     declare_parameter("exercise_limits", true);
     declare_parameter("position_move_speed",
                       static_cast<int>(PanTiltController::kPositionMoveSpeed));
@@ -113,6 +119,8 @@ public:
     const int pan_id = static_cast<int>(get_parameter("pan_motor_id").as_int());
     const int tilt_id =
         static_cast<int>(get_parameter("tilt_motor_id").as_int());
+    pan_enabled_ = get_parameter("pan_enabled").as_bool();
+    tilt_enabled_ = get_parameter("tilt_enabled").as_bool();
     pan_joint_name_ = get_parameter("pan_joint_name").as_string();
     tilt_joint_name_ = get_parameter("tilt_joint_name").as_string();
     const double state_rate = get_parameter("state_publish_rate").as_double();
@@ -130,10 +138,19 @@ public:
     if (baud <= 0) {
       throw std::invalid_argument("baud must be > 0");
     }
-    if (pan_id < 0 || pan_id > 253 || tilt_id < 0 || tilt_id > 253 ||
-        pan_id == tilt_id) {
+    if (!pan_enabled_ && !tilt_enabled_) {
       throw std::invalid_argument(
-          "pan_motor_id/tilt_motor_id must be distinct and in [0, 253]");
+          "at least one of pan_enabled/tilt_enabled must be true");
+    }
+    if ((pan_enabled_ && (pan_id < 0 || pan_id > 253)) ||
+        (tilt_enabled_ && (tilt_id < 0 || tilt_id > 253))) {
+      throw std::invalid_argument(
+          "pan_motor_id/tilt_motor_id must be in [0, 253]");
+    }
+    // Only a conflict when both axes actually address the bus.
+    if (pan_enabled_ && tilt_enabled_ && pan_id == tilt_id) {
+      throw std::invalid_argument(
+          "pan_motor_id and tilt_motor_id must be distinct");
     }
     if (state_rate <= 0.0) {
       throw std::invalid_argument("state_publish_rate must be > 0");
@@ -148,23 +165,46 @@ public:
     position_move_speed_ = static_cast<u16>(position_move_speed);
     velocity_acc_ = static_cast<u8>(velocity_acc);
 
-    controller_ = std::make_unique<PanTiltController>(
-        serial_port,
-        std::array<u8, PanTiltController::kMotorCount>{
-            static_cast<u8>(pan_id), static_cast<u8>(tilt_id)},
-        baud);
+    std::array<PanTiltController::AxisConfig, PanTiltController::kMotorCount>
+        axes;
+    axes[kPanIndex] = {
+        pan_enabled_,
+        static_cast<u8>(pan_id),
+        static_cast<int>(get_parameter("pan_home_ticks").as_int()),
+        degToRad(get_parameter("pan_min_angle_deg").as_double()),
+        degToRad(get_parameter("pan_max_angle_deg").as_double()),
+        "pan"};
+    axes[kTiltIndex] = {
+        tilt_enabled_,
+        static_cast<u8>(tilt_id),
+        static_cast<int>(get_parameter("tilt_home_ticks").as_int()),
+        degToRad(get_parameter("tilt_min_angle_deg").as_double()),
+        degToRad(get_parameter("tilt_max_angle_deg").as_double()),
+        "tilt"};
+
+    controller_ =
+        std::make_unique<PanTiltController>(serial_port, axes, baud);
     if (!controller_->initialize(run_calibration_ofs)) {
-      throw std::runtime_error("PanTiltController init failed on " +
-                               serial_port +
-                               " (check port, baud, and servo IDs)");
+      throw std::runtime_error(
+          "PanTiltController init failed on " + serial_port +
+          " (check port, baud, servo IDs, and the axis limit/home config)");
     }
     if (exercise_limits && !controller_->exerciseLimits()) {
       throw std::runtime_error(
           "exercise_limits self-test failed (range of motion obstructed?)");
     }
-    RCLCPP_INFO(get_logger(),
-                "Pan/tilt initialized and homed on %s (pan id %d, tilt id %d)",
-                serial_port.c_str(), pan_id, tilt_id);
+    std::string axis_summary;
+    if (pan_enabled_) {
+      axis_summary = "pan id " + std::to_string(pan_id);
+    }
+    if (tilt_enabled_) {
+      if (!axis_summary.empty()) {
+        axis_summary += ", ";
+      }
+      axis_summary += "tilt id " + std::to_string(tilt_id);
+    }
+    RCLCPP_INFO(get_logger(), "Pan/tilt initialized and homed on %s (%s)",
+                serial_port.c_str(), axis_summary.c_str());
 
     joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>(
         "joint_states", rclcpp::SensorDataQoS());
@@ -202,12 +242,14 @@ public:
 
 private:
   // Maps a joint name to a motor index, or -1 (with a throttled warning) if
-  // the name is not one of the configured joints.
+  // the name is not one of the configured joints. A disabled axis is treated
+  // as unknown, so commands for a motor this robot does not have are dropped
+  // rather than sent to the bus.
   int motorIndexForJoint(const std::string &name) {
-    if (name == pan_joint_name_) {
+    if (pan_enabled_ && name == pan_joint_name_) {
       return kPanIndex;
     }
-    if (name == tilt_joint_name_) {
+    if (tilt_enabled_ && name == tilt_joint_name_) {
       return kTiltIndex;
     }
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
@@ -256,9 +298,10 @@ private:
         continue;
       }
       msg.name.push_back(*names[i]);
-      // tracked_ticks is host-side dead-reckoned and stays truthful through
-      // wheel-mode multi-turn count slips; position_ticks is the raw register.
-      msg.position.push_back(ticksFromHomeToRad(i, states[i].tracked_ticks));
+      // angle_from_home_rad is derived from the host-side dead-reckoned
+      // tracked_ticks, so it stays truthful through wheel-mode multi-turn
+      // count slips that corrupt the raw position register.
+      msg.position.push_back(states[i].angle_from_home_rad);
       msg.velocity.push_back(stepsPerSecToRadPerSec(states[i].speed));
     }
     if (msg.name.empty()) {
@@ -271,6 +314,8 @@ private:
 
   std::string pan_joint_name_;
   std::string tilt_joint_name_;
+  bool pan_enabled_{true};
+  bool tilt_enabled_{true};
   u16 position_move_speed_{PanTiltController::kPositionMoveSpeed};
   u8 velocity_acc_{PanTiltController::kDefaultMoveAcc};
   std::unique_ptr<PanTiltController> controller_;
