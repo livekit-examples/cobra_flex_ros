@@ -99,6 +99,21 @@ def _launch_setup(context, *args, **kwargs):
         actions.append(Node(
             package='topic_tools',
             executable='relay',
+            name='joint_states_relay',
+            output='screen',
+            arguments=['/joint_states', f'/{participant_id}/joint_states'],
+        ))
+        actions.append(Node(
+            package='topic_tools',
+            executable='relay',
+            name='joint_states_relay',
+            output='screen',
+            arguments=[f'/{participant_id}/pan_tilt_velocity_cmd', '/pan_tilt_velocity_cmd'],
+        ))
+
+        actions.append(Node(
+            package='topic_tools',
+            executable='relay',
             name='odom_wheel_relay',
             output='screen',
             arguments=[f'/odom/wheel', '/odom'],
