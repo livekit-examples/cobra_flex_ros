@@ -24,7 +24,7 @@ ros_portal:
       direction: "out"
 
     # Pan/tilt head servo positions (pan_tilt_driver publishes at 20 Hz).
-    - topic: "/.*/joint_states"
+    - topic: "/joint_states"
       direction: "out"
       encoding: "jsonschema"
 
