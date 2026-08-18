@@ -110,7 +110,6 @@ def _launch_setup(context, *args, **kwargs):
             output='screen',
             arguments=[f'/{participant_id}/pan_tilt_velocity_cmd', '/pan_tilt_velocity_cmd'],
         ))
-
         actions.append(Node(
             package='topic_tools',
             executable='relay',
