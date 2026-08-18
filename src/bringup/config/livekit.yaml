@@ -7,16 +7,10 @@ ros_portal:
 
   topics:
     # Commands received from the controller (LiveKit -> ROS).
-    - topic: "/cobra_.*/cmd_vel"
+    - topic: "/.*/cmd_vel"
       direction: "in"
 
     - topic: "/goal_pose"
-      direction: "in"
-
-    - topic: "/initialpose"
-      direction: "in"
-
-    - topic: "/clicked_point"
       direction: "in"
 
     # Telemetry / sensor / nav streams sent out to LiveKit (ROS -> LiveKit)
@@ -30,27 +24,12 @@ ros_portal:
       direction: "out"
 
     # Pan/tilt head servo positions (pan_tilt_driver publishes at 20 Hz).
-    - topic: "/joint_states"
+    - topic: "/.*/joint_states"
       direction: "out"
       encoding: "jsonschema"
 
-    - topic: "/pan_tilt_velocity_cmd"
+    - topic: "/.*/pan_tilt_velocity_cmd"
       direction: "in"
-
-    - topic: "/scan"
-      direction: "out"
-
-    - topic: "/camera/image_raw"
-      direction: "out"
-
-    - topic: "/pose"
-      direction: "out"
-
-    - topic: "/slam_toolbox/graph_visualization"
-      direction: "out"
-
-    - topic: "/global_costmap/published_footprint"
-      direction: "out"
 
     - topic: "/imu/data_raw"
       max_rate_hz: 20
