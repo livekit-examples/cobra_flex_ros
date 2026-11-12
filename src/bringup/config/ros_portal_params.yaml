@@ -1,0 +1,16 @@
+# ROS Portal node parameters for the LiveKit Teleop Portal (portal v3).
+# Passed to ros_portal.launch.py as params_file:=...; see docker-compose.yml.
+/**:
+  ros__parameters:
+    # Discovery document returned by the get_robot_config RPC. Control types
+    # are hard-coded there for now. The path is inside the ros_portal container.
+    robot_config_path: /tmp/cobra_flex_robot_config.json
+    # Fleet Portal attributes (location column, globe pin, type column).
+    # lat/lng (decimal degrees, set together) pin the robot exactly on the
+    # globe; without them the portal uses an approximate city-center pin.
+    participant_attributes:
+      - lk.fleet.city=Denver
+      - lk.fleet.country=US
+      - lk.fleet.lat=39.7392
+      - lk.fleet.lng=-104.9903
+      - lk.fleet.model=rover

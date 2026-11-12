@@ -21,7 +21,13 @@ services:
     tty: true
 
   ros_portal:
-    image: livekit/ros-portal:jazzy-v0.3.0
+    # Portal v3 (get_robot_config, active operator, lk.fleet.*) needs a local
+    # ros-portal build from the sderosa/portal-v3-robot-config branch until it
+    # ships in a release. The stock livekit/ros-portal:jazzy-v0.3.0 image does not
+    # answer get_robot_config, so the Teleop app never lists the robot. Override
+    # with ROS_PORTAL_IMAGE.
+    image: ${ROS_PORTAL_IMAGE:-ros-portal:jazzy-portal-v3}
+    pull_policy: never
     container_name: ros_portal
     network_mode: host
     privileged: true
@@ -33,9 +39,12 @@ services:
     volumes:
       - /dev:/dev
       - ${LIVEKIT_CONFIG:-./src/bringup/config/livekit.yaml}:/tmp/cobra_flex_livekit.yaml:ro
+      - ${ROBOT_CONFIG:-./src/bringup/config/robot_config.json}:/tmp/cobra_flex_robot_config.json:ro
+      - ./src/bringup/config/ros_portal_params.yaml:/tmp/ros_portal_params.yaml:ro
     command:
       - ros2
       - launch
       - ros_portal
       - ros_portal.launch.py
       - config_path:=/tmp/cobra_flex_livekit.yaml
+      - params_file:=/tmp/ros_portal_params.yaml

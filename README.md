@@ -57,6 +57,32 @@ LIVEKIT_URL=http://localhost:7880 LIVEKIT_TOKEN=test1234 \
   LIVEKIT_CONFIG=./src/bringup/config/livekit.yaml docker compose up
 ```
 
+## LiveKit Teleop Portal
+
+The robot advertises itself to the [LiveKit Teleop](https://github.com/livekit-examples/teleop)
+app as a portal v3 robot. This needs a ros-portal image built from the
+`sderosa/portal-v3-robot-config` branch (`ros-portal:jazzy-portal-v3`).
+
+- `src/bringup/config/robot_config.json` is the discovery document that the
+  `get_robot_config` RPC returns. Its control types are hard-coded for now:
+  - `base` uses `base.twist.v1` on `/cmd_vel` (`geometry_msgs/msg/Twist`).
+  - `head` uses `joints.velocity_jog.v1` on `/head/joint_jog`
+    (`control_msgs/msg/JointJog`), with `/joint_states` as feedback.
+- `src/bringup/config/ros_portal_params.yaml` points ros-portal at that document
+  and sets the Fleet attributes `lk.fleet.city=Denver`, `lk.fleet.country=US`,
+  `lk.fleet.lat=39.7392`, `lk.fleet.lng=-104.9903` (Denver city center; replace
+  with the robot's real position for an exact globe pin) and `lk.fleet.model=rover`.
+- `livekit.yaml` allows `/cmd_vel` and `/head/joint_jog` inbound. The app
+  publishes each command on a data track with exactly that name.
+- `pan_tilt_driver` subscribes to `/head/joint_jog`. Only velocities are used.
+
+Restart the `ros_portal` container after you edit the document. The app reads
+it once each time it connects.
+
+The web app does not yet ship live adapters for `base.twist.v1` or
+`joints.velocity_jog.v1`. Until it does, the robot is discovered and its video
+and data are shown, but its controls show as unavailable.
+
 ## Hardware summary (wiki spec sheet)
 
 - 4x bus hub motors with built-in FOC (closed-loop speed control), differential

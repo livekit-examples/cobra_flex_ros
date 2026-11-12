@@ -6,6 +6,15 @@ ros_portal:
 
   topics:
     # Commands received from the controller (LiveKit -> ROS).
+    # Teleop Portal commands (see robot_config.json): the app publishes on the
+    # exact command track_name, which lands on the same ROS topic.
+    - topic: "/cmd_vel"
+      direction: "in"
+
+    - topic: "/head/joint_jog"
+      direction: "in"
+
+    # Legacy /rover page: per-participant /<id>/cmd_vel, relayed by the launch file.
     - topic: "/.*/cmd_vel"
       direction: "in"
 

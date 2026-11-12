@@ -28,6 +28,8 @@
  *  - sub  pan_tilt_position_cmd  sensor_msgs/JointState (position field;
  *         joints matched by name, missing joints leave that axis alone)
  *  - sub  pan_tilt_velocity_cmd  sensor_msgs/JointState (velocity field)
+ *  - sub  head/joint_jog         control_msgs/JointJog (velocities field;
+ *         the LiveKit Teleop joints.velocity_jog.v1 command)
  *  - pub  joint_states           sensor_msgs/JointState at state_publish_rate
  *  - srv  ~/home                 std_srvs/Trigger (blocking center move)
  */
@@ -38,7 +40,9 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
+#include <control_msgs/msg/joint_jog.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -218,7 +222,14 @@ public:
     velocity_cmd_sub_ = create_subscription<sensor_msgs::msg::JointState>(
         "pan_tilt_velocity_cmd", 10,
         [this](sensor_msgs::msg::JointState::ConstSharedPtr msg) {
-          onVelocityCmd(*msg);
+          applyVelocities(msg->name, msg->velocity);
+        });
+    // Same velocity path, as the control_msgs/JointJog the LiveKit Teleop app
+    // sends for joints.velocity_jog.v1 (relative name: /head/joint_jog).
+    joint_jog_sub_ = create_subscription<control_msgs::msg::JointJog>(
+        "head/joint_jog", 10,
+        [this](control_msgs::msg::JointJog::ConstSharedPtr msg) {
+          onJointJog(*msg);
         });
     // homeMotors() blocks until the move settles, so state publishing pauses
     // during the service call -- acceptable for a recovery operation.
@@ -272,19 +283,36 @@ private:
     }
   }
 
-  void onVelocityCmd(const sensor_msgs::msg::JointState &msg) {
-    for (size_t i = 0; i < msg.name.size() && i < msg.velocity.size(); ++i) {
-      const int idx = motorIndexForJoint(msg.name[i]);
+  // Pairs joint names with velocities (rad/s) by index; extra entries in
+  // either list are ignored.
+  void applyVelocities(const std::vector<std::string> &names,
+                       const std::vector<double> &velocities) {
+    for (size_t i = 0; i < names.size() && i < velocities.size(); ++i) {
+      const int idx = motorIndexForJoint(names[i]);
       if (idx < 0) {
         continue;
       }
-      const s16 steps = radPerSecToServoStepsPerSec(msg.velocity[i]);
+      const s16 steps = radPerSecToServoStepsPerSec(velocities[i]);
       if (!controller_->setVelocity(idx, steps, velocity_acc_)) {
         RCLCPP_WARN(get_logger(),
                     "Failed velocity command for '%s' (%f rad/s, %d steps/s)",
-                    msg.name[i].c_str(), msg.velocity[i], steps);
+                    names[i].c_str(), velocities[i], steps);
       }
     }
+  }
+
+  // Only velocity jogs are supported; displacement jogs would need a
+  // position target relative to the current pose, which nothing sends today.
+  void onJointJog(const control_msgs::msg::JointJog &msg) {
+    if (msg.velocities.empty()) {
+      if (!msg.displacements.empty()) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                             "Ignoring JointJog displacements; only velocities "
+                             "are supported");
+      }
+      return;
+    }
+    applyVelocities(msg.joint_names, msg.velocities);
   }
 
   void publishState() {
@@ -324,6 +352,7 @@ private:
       position_cmd_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
       velocity_cmd_sub_;
+  rclcpp::Subscription<control_msgs::msg::JointJog>::SharedPtr joint_jog_sub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr home_srv_;
   rclcpp::TimerBase::SharedPtr state_timer_;
 };

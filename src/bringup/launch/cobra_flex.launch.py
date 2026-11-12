@@ -106,7 +106,7 @@ def _launch_setup(context, *args, **kwargs):
         actions.append(Node(
             package='topic_tools',
             executable='relay',
-            name='joint_states_relay',
+            name='pan_tilt_velocity_relay',
             output='screen',
             arguments=[f'/{participant_id}/pan_tilt_velocity_cmd', '/pan_tilt_velocity_cmd'],
         ))
